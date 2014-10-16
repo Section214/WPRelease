@@ -281,7 +281,6 @@ deploy() {
 
     # Cleanup
     notice "Cleaning up..."
-    cd ${SVNPATH}
     cd ..
     rm -rf ${SVNPATH}
 
