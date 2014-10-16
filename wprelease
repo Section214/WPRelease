@@ -1,0 +1,316 @@
+#!/bin/bash
+#
+# WPRelease - A GIT->SVN WordPress deployment tool
+#
+# Copyright (c) 2014, Daniel J Griffiths <dgriffiths@section214.com>
+#
+# Thanks to:
+#
+# Dean Clatworthy
+# Brent Shepherd
+# Patrick Rauland
+# Ben Balter
+# Christoph S. Ackermann
+# Daniel F. Kudwien
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA 02110-1301, USA.
+
+############################################################
+# Configure stuff                                          #
+############################################################
+NAME=$(basename "$0")
+LONGNAME="WordPress Release Tool"
+VER="0.1"
+
+BOLD=`tput bold`
+NORMAL=`tput sgr0`
+
+############################################################
+# Helper functions                                         #
+############################################################
+ask() { (printf '    \033[01;33m->\033[00m '; echo -e "$* \c") > /dev/stderr; }
+notice() { (printf ' \033[01;34m::\033[00m '; echo -e "$*") > /dev/stderr; }
+warn() { (printf ' \033[01;33m::\033[00m '; echo -e "$*") > /dev/stderr; }
+error() { (printf ' \033[01;31m::\033[00m '; echo -e "$*") > /dev/stderr; }
+info() { (printf '    \033[01;33m->\033[00m '; echo -e "$*") > /dev/stderr; }
+dryrun() { (printf '    \033[01;32m->\033[00m '; echo -e "$*") > /dev/stderr; }
+success() { (printf ' \033[01;32m::\033[00m '; echo -e "$*") > /dev/stderr; }
+exiterror() { sleep 1; exit 1; }
+
+yesno() {
+    read YESNO
+    case "${YESNO}" in
+        [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|[Oo][Nn]|1) return 0;;
+        [Nn]|[Nn][Oo]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|0) return 1;;
+        *) return 1;;
+    esac
+}
+
+
+############################################################
+# Display version and exit                                 #
+############################################################
+version() {
+    echo "${LONGNAME} v${VER}"
+}
+
+
+############################################################
+# Display usage information                                #
+############################################################
+usage() {
+    version
+    echo "Usage: ${NAME} [OPTION]"
+    echo "Deploy a plugin from GIT to the WordPress SVN repository."
+    echo
+    echo "  -d, --dryrun          simulate deployment only"
+    echo "  -n, --new             setup a new wprelease config file"
+    echo "  -h, --help            display this help and exit"
+    echo "  -v, --version         output version information and exit"
+    echo
+    echo "With no OPTION, deploy to SVN."
+    echo
+    echo "Report ${NAME} bugs: <https://github.com/Section214/WPRelease/issues>"
+}
+
+
+############################################################
+# Setup new config                                         #
+############################################################
+new() {
+    version
+
+    if [[ -f ".wprelease" ]]; then
+        error "WPRelease configuration file already exists!"
+        exiterror
+    fi
+
+    ask "Enter plugin slug:"
+    read SHORTNAME
+
+    ask "Enter main plugin file name:"
+    read MAINFILE
+
+    ask "Enter your WordPress.org username:"
+    read SVNUSER
+
+    echo "#!/bin/bash
+#
+# WPRelease configuration file
+
+# Plugin slug
+SHORTNAME=\"${SHORTNAME}\"
+
+# Plugin configuration
+PLUGINPATH=\`pwd\`
+MAINFILE=\"${MAINFILE}\"
+
+# Subversion configuration
+SVNUSER=\"${SVNUSER}\"
+
+# Path for SVN temp directory
+SVNPATH=\".wprsvn\"" > .wprelease
+
+    success "New configuration file created for ${BOLD}${SHORTNAME}${NORMAL}."
+}
+
+
+############################################################
+# Deploy to SVN                                            #
+############################################################
+deploy() {
+    version
+
+    # Setup a few things
+    SELFDIR=${BASH_SOURCE%/*}
+    
+    # Bail if this isn't a controlled directory
+    if [[ ! -f ".wprelease" ]]; then
+        error "This directory does not contain a valid release file!"
+        info "Please run ${BOLD}${NAME} -n${NORMAL} before continuing."
+        exiterror
+    fi
+
+    source .wprelease
+
+    # Validate configuration
+    [[ -n ${SHORTNAME} ]] || { error "Plugin slug must not be empty!"; exiterror; }
+    [[ -e ${PLUGINPATH} ]] || { error "Plugin path does not exist!"; exiterror; }
+    [[ -e ${PLUGINPATH}/${MAINFILE} ]] || { error "Plugin file does not exist!"; exiterror; }
+    [[ -n ${SVNUSER} ]] || { error "Subversion username must not be empty!"; exiterror; }
+    [[ -e ${PLUGINPATH}/readme.txt ]] || { error "Plugin readme does not exist!"; exiterror; }
+
+    # Initialize variables
+    SVNURL=${SVNURL:="http://plugins.svn.wordpress.org/${SHORTNAME}/"}
+    SVNCMD="svn --username=${SVNUSER}"
+
+    # Is this a dry run?
+    if [[ ${DRYRUN} != 0 ]]; then
+        DRYRUN="dryrun"
+    else
+        DRYRUN=
+    fi
+
+    # Output header
+    notice "Beginning deployment for ${BOLD}${SHORTNAME}${NORMAL}."
+    info "${BOLD}Source Directory:${NORMAL}      ${PLUGINPATH}"
+    info "${BOLD}Target Repository:${NORMAL}     ${SVNURL}"
+
+    # Validate new version
+    NEWVERSION=`grep -E "Version:" "${PLUGINPATH}/${MAINFILE}" | awk -F ' ' '{print $NF}'`
+    READMEVERSION=`grep "^Stable tag" "${PLUGINPATH}/readme.txt" | awk -F ' ' '{print $3}'`
+
+    info "${BOLD}Plugin Version:${NORMAL}        ${NEWVERSION}"
+    info "${BOLD}Readme Version:${NORMAL}        ${READMEVERSION}"
+
+    if [[ "${NEWVERSION}" != "${READMEVERSION}" ]]; then
+        error "Versions specified in readme.txt and ${MAINFILE} differ!"
+        exiterror
+    fi
+
+    if git show-ref --tags --quiet --verify -- "refs/tags/${NEWVERSION}"; then
+        warn "Tag ${NEWVERSION} already exists in git!"
+        ask "Continue without git changes? [y/N]"
+        CONFIRM=`yesno`
+
+        if [[ $? == 1 ]]; then
+            error "Aborted by user."
+            exiterror
+        fi
+    fi
+
+    # Review and confirm  changes
+    notice "Review and confirm changes:"
+    ${DRYRUN} git commit -pem "Preparing release ${NEWVERSION}"
+
+    ask "Ready to tag release in git? [y/N]"
+    CONFIRM=`yesno`
+
+    if [[ $? == 1 ]]; then
+        error "Aborted by user."
+        exiterror
+    fi
+
+    notice "Tagging release in git..."
+    ${DRYRUN} git tag -a "${NEWVERSION}" -m "Tagging release ${NEWVERSION}."
+
+    ask "Ready to publish release to git? [y/N]"
+    CONFIRM=`yesno`
+
+    if [[ $? == 1 ]]; then
+        error "Aborted by user."
+        exiterror
+    fi
+
+    notice "Pushing master to origin, including tags..."
+    ${DRYRUN} git push origin master --tags
+
+    # Begin Subversion process
+    notice "Checking out SVN repository..."
+    ${SVNCMD} checkout ${SVNURL} ${SVNPATH}
+
+    notice "Setting svn:ignore for git and wprelease files..."
+    svn propset svn:ignore "
+    README.md
+    .git*
+    .wprelease
+    " "${SVNPATH}/trunk/"
+
+    notice "Exporting git HEAD of master to SVN trunk..."
+
+    # Delete existing files
+    find ${SVNPATH}/trunk/ -type f -exec rm '{}' ';'
+    # Export current files
+    git checkout-index --all --force --prefix=${SVNPATH}/trunk/
+
+    # Recursively check out submodules
+    if [[ -f ".gitmodules" ]]; then
+        notice "Exporting git HEAD of submodules to SVN trunk..."
+        git submodule init
+        git submodule update
+        git submodule foreach --recursive 'git checkout-index --all --force --prefix=${SVNPATH}/trunk/$path/'
+    fi
+
+    notice "Exporting to SVN..."
+    pushd ${SVNPATH} > /dev/null
+    pushd trunk > /dev/null
+
+    # Delete missing/deleted files
+    STATUS=`svn status | grep "^!" | awk '{gsub(":\\\\", "/", $2); gsub("\\\\", "/", $2); print $2}'`
+    if [[ ! -z ${STATUS} ]]; then
+        svn status | grep "^!" | awk '{gsub(":\\\\", "/", $2); gsub("\\\\", "/", $2); print $2}' | xargs svn delete
+    fi
+
+    # Add new files
+    STATUS=`svn status | grep "^?" | awk '{gsub(":\\\\", "/", $2); gsub("\\\\", "/", $2); print $2}'`
+    if [[ ! -z ${STATUS} ]]; then
+        svn status | grep "^?" | awk '{gsub(":\\\\", "/", $2); gsub("\\\\", "/", $2); print $2}' | xargs svn add
+    fi
+
+    # Safety net!
+    notice "Changes to be committed to SVN:"
+    svn status
+    ask "Ready to publish release to SVN? [y/N]"
+    CONFIRM=`yesno`
+
+    if [[ $? == 1 ]]; then
+        error "Aborted by user."
+        exiterror
+    fi
+
+    ${DRYRUN} ${SVNCMD} commit -m "Preparing release ${NEWVERSION}."
+
+    notice "Creating and committing SVN tag..."
+    popd > /dev/null
+    svn copy trunk tags/${NEWVERSION}
+    pushd tags/${NEWVERSION} > /dev/null
+    ${DRYRUN} ${SVNCMD} commit -m "Tagging release ${NEWVERSION}."
+    popd > /dev/null
+
+    # Cleanup
+    notice "Cleaning up..."
+    rm -rf ${SVNPATH}
+
+    success "Release deployed."
+    popd > /dev/null
+}
+
+
+############################################################
+# Go, dev go!                                              #
+############################################################
+case "$1" in
+    '-d'|'--dryrun')
+        DRYRUN=1
+        deploy
+        ;;
+    '-h'|'--help')
+        usage
+        ;;
+    '-v'|'--version')
+        version
+        ;;
+    '-n'|'--new')
+        new
+        ;;
+    '')
+        DRYRUN=0
+        deploy
+        ;;
+    *)
+        usage
+        ;;
+esac
